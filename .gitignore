@@ -1,0 +1,23 @@
+# Python venv —— 由 scripts/setup.sh 本地生成，147MB，绝不入库
+.venv/
+__pycache__/
+*.py[cod]
+
+# 本地用户状态 —— 这里面是登录凭证，绝不能提交
+# （默认存在 ~/.config/feishu-minutes/，此处为防御性拦截）
+browser-profile/
+.browser-profile/
+.feishu_minutes_state.json
+*.log
+.env
+*.pem
+*.key
+
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
