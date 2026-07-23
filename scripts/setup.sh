@@ -27,6 +27,12 @@ if ! "$VENV/bin/python" -c "import playwright" >/dev/null 2>&1; then
   "$VENV/bin/pip" install -q playwright
 fi
 
+# oss2 仅 ASR 兜底用（把无转写妙记的音频传到 OSS 中转），装上不占多少空间
+if ! "$VENV/bin/python" -c "import oss2" >/dev/null 2>&1; then
+  echo "→ 安装 oss2（ASR 兜底可选依赖）..."
+  "$VENV/bin/pip" install -q oss2
+fi
+
 echo "→ 检查 chromium 内核..."
 "$VENV/bin/python" -m playwright install chromium
 

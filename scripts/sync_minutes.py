@@ -26,6 +26,9 @@ import sys
 import time
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import asr  # 可选的 ASR 兜底，未配 key 时自动禁用
+
 LIST_HOST = "https://meetings.feishu.cn"
 LIST_API = LIST_HOST + "/minutes/api/space/list"
 EXPORT_API = LIST_HOST + "/minutes/api/export"
@@ -146,6 +149,31 @@ def wait_for_login(page, timeout):
             warned = True
         time.sleep(3)
     return False
+
+
+def _ts_to_sec(ts):
+    parts = [int(x) for x in ts.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def transcript_incomplete(paras, duration_ms):
+    """判断飞书转写是不是残缺（免费额度耗尽时会只转开头一小段就停）。
+
+    信号：转写段落覆盖到的最后时间点，只占录音时长的一小部分。
+    不看总字数——一段真实的长转写和一段被截断的短转写，靠覆盖率才分得清。
+    """
+    if not paras:
+        return True
+    try:
+        dur = int(duration_ms) / 1000
+    except (TypeError, ValueError):
+        return False  # 不知道时长就别瞎触发 ASR
+    if dur <= 0:
+        return False
+    last = max(_ts_to_sec(ts) for _, ts, _ in paras)
+    return last < dur * 0.5  # 覆盖不到一半 = 残缺
 
 
 def api_base(page):
@@ -341,7 +369,11 @@ def main():
     ap.add_argument("--headless", action="store_true", help="无头模式（仅在已登录后可用）")
     ap.add_argument("--limit", type=int, default=0, help="最多拉取几条新的（0=不限）")
     ap.add_argument("--timeout", type=int, default=300, help="等待登录的秒数")
+    ap.add_argument("--no-asr", action="store_true",
+                    help="即使配了 key 也不对无转写的妙记做 ASR 兜底")
     args = ap.parse_args()
+
+    use_asr = (not args.no_asr) and asr.asr_available()
 
     try:
         from playwright.sync_api import sync_playwright
@@ -385,6 +417,13 @@ def main():
         if not csrf:
             log("⚠️ 没取到 bv_csrf_token，导出可能会失败")
 
+        result["untranscribed"] = []
+        if use_asr:
+            log("ℹ️ ASR 兜底已启用：无飞书转写的妙记将用百炼 Paraformer 转写")
+        elif not args.no_asr and asr.missing_env():
+            log(f"ℹ️ ASR 兜底未启用（缺环境变量：{', '.join(asr.missing_env())}）；"
+                f"无转写的妙记会被跳过")
+
         minutes = fetch_all_minutes(page)
         result["total"] = len(minutes)
         log(f"云端共 {len(minutes)} 条妙记")
@@ -407,10 +446,24 @@ def main():
             title = m.get("topic") or "未命名妙记"
             try:
                 raw = export_transcript(page, token, csrf)
-                if not raw.strip():
-                    log(f"  [{i}/{len(todo)}] ⚠️ 空逐字稿，跳过：{title}")
-                    continue
+                source = "feishu"
+                # 飞书没转写 / 只转了开头一小段（免费额度耗尽）时，用覆盖率判断。
+                _, _, _, paras = parse_transcript(raw)
+                if transcript_incomplete(paras, m.get("duration")):
+                    if use_asr:
+                        cov = "无" if not paras else f"仅覆盖开头，共 {len(paras)} 段"
+                        log(f"  [{i}/{len(todo)}] 🎙 飞书转写残缺（{cov}），改用 Paraformer：{title}")
+                        raw, nsent = asr.transcribe_minute(page, ctx, token, api_base(page), m, out_dir)
+                        source = "dashscope-paraformer"
+                        log(f"      ✅ ASR 完成，{nsent} 句")
+                    else:
+                        log(f"  [{i}/{len(todo)}] ⏭ 无飞书转写、未启用 ASR，跳过：{title}")
+                        result["untranscribed"].append({"token": token, "title": title})
+                        continue
                 md, base, npara = build_markdown(m, raw)
+                if source != "feishu":
+                    md = md.replace("enriched: false",
+                                    f"enriched: false\ntranscribed_by: {source}", 1)
                 path = os.path.join(out_dir, base + ".md")
                 n = 2
                 while os.path.exists(path):
@@ -423,9 +476,10 @@ def main():
                     "file": os.path.basename(path),
                     "pulled_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "enriched": False,
+                    "source": source,
                 }
-                result["new"].append({"token": token, "title": title,
-                                      "path": path, "paragraphs": npara})
+                result["new"].append({"token": token, "title": title, "path": path,
+                                      "paragraphs": npara, "source": source})
                 log(f"  [{i}/{len(todo)}] ✅ {title}（{npara} 段）")
                 save_state(out_dir, state)
             except Exception as e:

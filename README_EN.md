@@ -98,6 +98,15 @@ Each note contains:
 
 While summarizing, Claude actively **filters out** small talk, tech-difficulty grumbling, gossip, and personal/private material (job changes, health, salary, relationships). Coffee chats are full of that, and you probably don't want it in your knowledge base.
 
+### Optional: transcribe what Feishu didn't
+
+Free Feishu accounts get only **300 minutes** of transcription. Recordings past that cap have no transcript, or only the first few sentences. With a speech-model key configured, those minutes are detected automatically, their audio is pulled and re-transcribed (with speaker diarization and timestamps), and folded into the same Markdown.
+
+- **Off by default** — without a key the core feature is unaffected; untranscribed minutes are skipped and listed in the result.
+- Currently wired to **Alibaba Bailian's Paraformer**: ~¥0.2 per hour of audio, results in 1–2 minutes.
+- Needs `DASHSCOPE_API_KEY` plus a set of OSS credentials (the audio is relayed through object storage so Bailian can reach it — into your own private bucket, deleted right after). See the "ASR fallback" section in [SKILL.md](SKILL.md).
+- Whether a minute "needs re-transcribing" is judged by **coverage**, not by whether there's any text — when the quota runs out Feishu often has already transcribed the first couple of sentences, so a text-presence check would miss it.
+
 ---
 
 ## Why not the public API

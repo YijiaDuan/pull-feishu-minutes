@@ -197,7 +197,28 @@ enriched: true
 
 ### 第 4 步：汇报
 
-告诉用户：本次新增几篇、分别是什么、存在哪；以及跳过了多少条已有的。
+告诉用户：本次新增几篇、分别是什么、存在哪；以及跳过了多少条已有的。若结果 JSON 里 `untranscribed` 非空，说明有妙记没有飞书转写、且未启用 ASR 兜底——把这些条目告诉用户，并提示可以配置 ASR（见下）来补转。
+
+## 可选：ASR 兜底（转写飞书没转的妙记）
+
+飞书免费版只有 **300 分钟** 转写额度，超额的妙记会没有逐字稿，或只转了开头一小段就停。本 skill 能把这类妙记的**音频**抠出来，交给一个语音大模型补转。
+
+**默认关闭。** 只有当以下环境变量齐备时才启用（脚本会自动探测；缺变量就跳过这些妙记并在结果里列进 `untranscribed`）：
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `DASHSCOPE_API_KEY` | 阿里云百炼 key，调 Paraformer 转写 |
+| `ALIYUN_ACCESS_KEY_ID` / `ALIYUN_ACCESS_KEY_SECRET` | 上传音频到 OSS 中转 |
+| `FEISHU_ASR_OSS_BUCKET` | 用作中转的 OSS bucket 名 |
+| `FEISHU_ASR_OSS_ENDPOINT` | OSS endpoint，默认 `oss-cn-hangzhou.aliyuncs.com` |
+
+**为什么要 OSS 中转**：飞书音频地址是登录态保护的，百炼够不着；百炼的录音文件识别接口只收「它自己能访问的公网 URL」。所以音频先进用户自己的私有 bucket，只给百炼一个 2 小时过期的**签名 URL**（不公开），转写完**立即删除**中转文件。
+
+**判断哪条需要补转**：不是看有没有逐字稿，而是看**转写覆盖了录音时长的多少**。免费额度耗尽时飞书常常只转了开头两三句，光看"有没有段落"会误判成"已转写"。脚本按覆盖率 < 50% 判定为残缺 → 触发 ASR，用全量音频重转（`transcribed_by: dashscope-paraformer` 会写进 frontmatter）。
+
+**运行**：把上面的 env 准备好（通常放在用户的 secrets 文件里，运行前 `source` 一下），再照第 2 步正常跑即可。带 `--no-asr` 可临时禁用。ASR 那条会在 `new` 里标 `"source":"dashscope-paraformer"`，你照样为它写总结（第 3 步），并在总结顶部注明"逐字稿由 Paraformer 补转、有少量识别错"。
+
+**成本**：极低。Paraformer 转 1 小时音频约几毛钱，且处理很快（1 小时的音频通常 1~2 分钟出结果）。
 
 ## 增量与重跑
 
@@ -224,3 +245,6 @@ enriched: true
 - **不能用 `wait_for_load_state("networkidle")`**。妙记页面有长连接，永远到不了 networkidle，超时抛异常被吞掉后表现为"死等登录"。
 - **登录后飞书会重定向到企业专属域名**（如 `xxx.feishu.cn`），API 必须跟随页面当前源，跨域 fetch 会被 CORS 直接拦死。
 - **导出接口是 POST，必须带 `bv-csrf-token` 头**，且**每个域名各有一份不同的值**，取错域一律 HTTP 400。
+- **判断"需要 ASR"要按覆盖率，不能按有没有段落**。免费额度耗尽的妙记，飞书常常已经转了开头两三句，`parse_transcript` 会返回非空段落——只看"有没有段落"必然漏判。用「最后一段的时间戳 / 录音时长」判断。
+- **音频地址要先打开播放页才拿得到**（读 `<audio>.currentSrc`），它在 `internal-api-drive-stream.feishu.cn` 上，是带过期的临时地址。下载用 `ctx.request`（带 cookie），不能在页面里跨域 fetch。
+- **百炼录音文件识别只收公网 URL**，收不了本地文件、也够不到飞书的登录态地址——所以必须 OSS（或任意公网可访问处）中转，给签名 URL 即可，不必公开 bucket。
