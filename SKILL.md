@@ -203,22 +203,33 @@ enriched: true
 
 飞书免费版只有 **300 分钟** 转写额度，超额的妙记会没有逐字稿，或只转了开头一小段就停。本 skill 能把这类妙记的**音频**抠出来，交给一个语音大模型补转。
 
-**默认关闭。** 只有当以下环境变量齐备时才启用（脚本会自动探测；缺变量就跳过这些妙记并在结果里列进 `untranscribed`）：
+**默认关闭。** 只有当环境变量齐备时才启用（脚本自动探测；缺变量就跳过这些妙记并在结果里列进 `untranscribed`）。
+
+支持两个后端，`FEISHU_ASR_BACKEND` 选（默认 `auto`）：
+
+| 后端 | 说明 |
+| --- | --- |
+| **volcano**（推荐） | 火山引擎 豆包语音大模型 Seed-ASR。中英混杂、专有名词、标点明显更准（实测 PMF/agent/跨境电商/脉脉 这类词 Paraformer 会错、火山基本全对）。需 ffmpeg（把飞书的 m4a 转 mp3）。 |
+| **paraformer** | 阿里云百炼 Paraformer。免转码（直接吃 m4a），但中英混杂词错得多。 |
+| `auto` | 有 `VOLC_ASR_KEY` 走 volcano，否则有 `DASHSCOPE_API_KEY` 走 paraformer。 |
 
 | 环境变量 | 用途 |
 | --- | --- |
-| `DASHSCOPE_API_KEY` | 阿里云百炼 key，调 Paraformer 转写 |
-| `ALIYUN_ACCESS_KEY_ID` / `ALIYUN_ACCESS_KEY_SECRET` | 上传音频到 OSS 中转 |
+| `ALIYUN_ACCESS_KEY_ID` / `ALIYUN_ACCESS_KEY_SECRET` | 上传音频到 OSS 中转（两个后端都要） |
 | `FEISHU_ASR_OSS_BUCKET` | 用作中转的 OSS bucket 名 |
 | `FEISHU_ASR_OSS_ENDPOINT` | OSS endpoint，默认 `oss-cn-hangzhou.aliyuncs.com` |
+| `VOLC_ASR_KEY` | 火山后端：控制台开通「录音文件识别大模型版(极速版)」后拿的 `X-Api-Key`（单 key 鉴权） |
+| `DASHSCOPE_API_KEY` | 百炼后端：一个 key 同时管 Paraformer 语音 + Qwen 文本 |
 
-**为什么要 OSS 中转**：飞书音频地址是登录态保护的，百炼够不着；百炼的录音文件识别接口只收「它自己能访问的公网 URL」。所以音频先进用户自己的私有 bucket，只给百炼一个 2 小时过期的**签名 URL**（不公开），转写完**立即删除**中转文件。
+**为什么要 OSS 中转**：飞书音频地址是登录态保护的，语音服务够不着；两个后端的录音文件识别都只收「它自己能访问的公网 URL」。所以音频先进用户自己的私有 bucket，只给一个 2 小时过期的**签名 URL**（不公开），转写完**立即删除**中转文件。
 
 **判断哪条需要补转**：不是看有没有逐字稿，而是看**转写覆盖了录音时长的多少**。免费额度耗尽时飞书常常只转了开头两三句，光看"有没有段落"会误判成"已转写"。脚本按覆盖率 < 50% 判定为残缺 → 触发 ASR，用全量音频重转（`transcribed_by: dashscope-paraformer` 会写进 frontmatter）。
 
-**运行**：把上面的 env 准备好（通常放在用户的 secrets 文件里，运行前 `source` 一下），再照第 2 步正常跑即可。带 `--no-asr` 可临时禁用。ASR 那条会在 `new` 里标 `"source":"dashscope-paraformer"`，你照样为它写总结（第 3 步），并在总结顶部注明"逐字稿由 Paraformer 补转、有少量识别错"。
+火山后端还需要 **ffmpeg**（`setup.sh` 不装它——请用户自行 `brew install ffmpeg` / `apt install ffmpeg`；缺了会在 `missing_env` 里提示）。
 
-**成本**：极低。Paraformer 转 1 小时音频约几毛钱，且处理很快（1 小时的音频通常 1~2 分钟出结果）。
+**运行**：把 env 准备好（通常放在 secrets 文件里，运行前 `source` 一下），再照第 2 步正常跑。带 `--no-asr` 可临时禁用。ASR 那条会在 `new` 里标 `"source":"volcano-seed-asr"` 或 `"dashscope-paraformer"`，你照样为它写总结（第 3 步），并在总结顶部注明逐字稿由哪个模型补转、可能有识别错。
+
+**成本**：都极低，转 1 小时音频约几毛钱、1~2 分钟出结果（火山极速版实测 46 分钟音频 29 秒）。
 
 ## 增量与重跑
 
