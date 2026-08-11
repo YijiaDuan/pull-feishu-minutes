@@ -99,8 +99,9 @@ def download_audio(ctx, src, dest):
 
 
 def to_mp3(m4a_path, mp3_path):
+    # 16kHz 单声道 32kbps：对语音识别足够，文件小一半、上传更稳
     r = subprocess.run(
-        ["ffmpeg", "-y", "-i", m4a_path, "-ac", "1", "-ar", "16000", "-b:a", "64k", mp3_path],
+        ["ffmpeg", "-y", "-i", m4a_path, "-ac", "1", "-ar", "16000", "-b:a", "32k", mp3_path],
         capture_output=True)
     if r.returncode != 0 or not os.path.exists(mp3_path):
         raise RuntimeError("ffmpeg 转码失败：" + r.stderr.decode("utf8", "replace")[-300:])
@@ -114,8 +115,20 @@ def upload_oss(local_path, object_key):
     if not endpoint.startswith("http"):
         endpoint = "https://" + endpoint
     auth = oss2.Auth(os.environ["ALIYUN_ACCESS_KEY_ID"], os.environ["ALIYUN_ACCESS_KEY_SECRET"])
-    bucket = oss2.Bucket(auth, endpoint, os.environ["FEISHU_ASR_OSS_BUCKET"])
-    bucket.put_object_from_file(object_key, local_path)
+    bucket = oss2.Bucket(auth, endpoint, os.environ["FEISHU_ASR_OSS_BUCKET"], connect_timeout=120)
+    # 分片上传：单片 2MB、失败只重传该片，大文件/弱网远比单次 PUT 稳
+    last = None
+    for _ in range(3):
+        try:
+            oss2.resumable_upload(bucket, object_key, local_path,
+                                  multipart_threshold=4 * 1024 * 1024,
+                                  part_size=2 * 1024 * 1024, num_threads=3)
+            break
+        except Exception as e:
+            last = e
+            time.sleep(3)
+    else:
+        raise RuntimeError(f"OSS 上传失败（重试 3 次）：{last}")
     return bucket, bucket.sign_url("GET", object_key, 7200)
 
 
@@ -210,7 +223,33 @@ def _assemble(rows, meta):
 
 # ---------- 对外：对一条妙记做完整 ASR 兜底 ----------
 
+_LABEL = {"volcano": "volcano-seed-asr", "paraformer": "dashscope-paraformer"}
+
+
+def _run_backend(which, m4a, mp3, token, tmp_files):
+    """按后端准备中转文件、上传 OSS、调用识别，返回 rows。中转文件转完即删。"""
+    if which == "volcano":
+        to_mp3(m4a, mp3)
+        if mp3 not in tmp_files:
+            tmp_files.append(mp3)
+        okey = f"_feishu_asr_tmp/{token}.mp3"
+        bucket, url = upload_oss(mp3, okey)
+        call = _volcano
+    else:
+        okey = f"_feishu_asr_tmp/{token}.m4a"
+        bucket, url = upload_oss(m4a, okey)
+        call = _paraformer
+    try:
+        return call(url)
+    finally:
+        try:
+            bucket.delete_object(okey)
+        except Exception:
+            pass
+
+
 def transcribe_minute(page, ctx, token, base, meta, tmp_dir):
+    """返回 (逐字稿文本, 句数, 实际用的后端 label)。"""
     src = get_audio_src(page, token, base)
     if not src:
         raise RuntimeError("拿不到音频地址（可能是无音频的纯文档妙记）")
@@ -220,22 +259,19 @@ def transcribe_minute(page, ctx, token, base, meta, tmp_dir):
     tmp_files = [m4a]
     try:
         download_audio(ctx, src, m4a)
-        if b == "volcano":
-            to_mp3(m4a, mp3)
-            tmp_files.append(mp3)
-            bucket, url = upload_oss(mp3, f"_feishu_asr_tmp/{token}.mp3")
-            okey = f"_feishu_asr_tmp/{token}.mp3"
-        else:
-            bucket, url = upload_oss(m4a, f"_feishu_asr_tmp/{token}.m4a")
-            okey = f"_feishu_asr_tmp/{token}.m4a"
         try:
-            rows = _volcano(url) if b == "volcano" else _paraformer(url)
-        finally:
-            try:
-                bucket.delete_object(okey)
-            except Exception:
-                pass
-        return _assemble(rows, meta)
+            rows = _run_backend(b, m4a, mp3, token, tmp_files)
+            used = b
+        except Exception as e:
+            # 火山极速版只收 ≤2 小时的音频，超长会报 45000132；只要配了百炼 key，
+            # 就自动回退到 Paraformer（无时长上限、直接吃 m4a），别让长录音漏掉。
+            if b == "volcano" and os.environ.get("DASHSCOPE_API_KEY"):
+                rows = _run_backend("paraformer", m4a, mp3, token, tmp_files)
+                used = "paraformer"
+            else:
+                raise
+        text, n = _assemble(rows, meta)
+        return text, n, _LABEL.get(used, used)
     finally:
         for f in tmp_files:
             if os.path.exists(f):

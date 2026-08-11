@@ -453,9 +453,8 @@ def main():
                     if use_asr:
                         cov = "无" if not paras else f"仅覆盖开头，共 {len(paras)} 段"
                         log(f"  [{i}/{len(todo)}] 🎙 飞书转写残缺（{cov}），改用 {asr.backend()} 转写：{title}")
-                        raw, nsent = asr.transcribe_minute(page, ctx, token, api_base(page), m, out_dir)
-                        source = asr.backend_label()
-                        log(f"      ✅ ASR 完成，{nsent} 句")
+                        raw, nsent, source = asr.transcribe_minute(page, ctx, token, api_base(page), m, out_dir)
+                        log(f"      ✅ ASR 完成（{source}），{nsent} 句")
                     else:
                         log(f"  [{i}/{len(todo)}] ⏭ 无飞书转写、未启用 ASR，跳过：{title}")
                         result["untranscribed"].append({"token": token, "title": title})
